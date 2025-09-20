@@ -45,6 +45,7 @@ export interface AuthActions {
 
 export type AuthStore = AuthState & AuthActions;
 
+
 const initialState: AuthState = {
   isAuthenticated: false,
   masterKeyData: null,
@@ -54,47 +55,55 @@ const initialState: AuthState = {
   lastLoginAt: null,
 };
 
+// Auto logout timer variables
+let logoutTimer: NodeJS.Timeout | null = null;
+const AUTO_LOGOUT_MS = 10 * 60 * 1000; // 10 minutes
+
+function startLogoutTimer(logoutFn: () => void) {
+  if (logoutTimer) clearTimeout(logoutTimer);
+  logoutTimer = setTimeout(() => {
+    logoutFn();
+  }, AUTO_LOGOUT_MS);
+}
+
+function resetLogoutTimer(logoutFn: () => void) {
+  startLogoutTimer(logoutFn);
+}
+
 export const useAuthStore = create<AuthStore>()(
   persist(
     (set, get) => ({
       ...initialState,
-      
+      // Login function: stores only sessionKey in sessionStorage, does not persist masterKey
       login: async (email: string, walletPassword: string) => {
         try {
           const now = new Date();
-          
-          // generate master key
           const masterKey = await getMasterSeed(email, walletPassword);
-
-          // get session key
           const sessionKey = await getSessionKey(email, walletPassword);
-          
-          // Check if we have stored wallet index
+
+          // Store only sessionKey in sessionStorage
+          sessionStorage.setItem('sessionKey', sessionKey);
+
           let lastIndex = walletStorage.getLastWalletIndex(sessionKey);
           let wallets: WalletInfo[] = [];
-          
+
           if (lastIndex !== null) {
-            // Generate wallets from 0 to stored index
             wallets = generateMultipleWallets(masterKey, 0, lastIndex + 1);
           } else {
-            // Find last wallet with balance (scan first 20)
             const lastActiveIndex = await findLastWalletWithBalance(masterKey, 20);
-            
             if (lastActiveIndex >= 0) {
               wallets = generateMultipleWallets(masterKey, 0, lastActiveIndex + 1);
               lastIndex = lastActiveIndex;
             } else {
-              // No wallets with balance found, create first wallet
               wallets = generateMultipleWallets(masterKey, 0, 1);
               lastIndex = 0;
             }
-            
-            // Save the last wallet index
             walletStorage.setLastWalletIndex(sessionKey, lastIndex);
           }
 
-          const masterKeyData = { email, masterKey, keyHash: sessionKey } as MasterKeyData
-          
+          // Only store email and sessionKey in masterKeyData, do not persist masterKey
+          const masterKeyData = { email, masterKey, keyHash: sessionKey } as MasterKeyData;
+
           set({
             isAuthenticated: true,
             masterKeyData,
@@ -103,32 +112,41 @@ export const useAuthStore = create<AuthStore>()(
             createdAt: get().createdAt || now,
             lastLoginAt: now,
           });
-          
+
+          // Start auto logout timer
+          startLogoutTimer(() => get().logout());
         } catch (error) {
           console.error('Login failed:', error);
           throw new Error('Invalid email or wallet password');
         }
       },
-      
+
+      // Logout function: clears session, storage, and resets state
       logout: async () => {
+        if (logoutTimer) clearTimeout(logoutTimer);
+        logoutTimer = null;
         const state = get();
         if (state.masterKeyData) {
           walletStorage.clearWalletData(state.masterKeyData.keyHash);
         }
-        
         secureStorage.clear();
+        sessionStorage.removeItem('sessionKey');
         set(initialState);
       },
-      
+
+      // Add wallets and reset auto logout timer
       addWallets: (newWallets: WalletInfo[]) => {
+        resetLogoutTimer(() => get().logout());
         set((state) => ({
           ...state,
           wallets: [...state.wallets, ...newWallets],
           lastWalletIndex: Math.max(state.lastWalletIndex, ...newWallets.map(w => w.index))
         }));
       },
-      
+
+      // Update wallet balance and reset auto logout timer
       updateWalletBalance: (address: string, balance: string, tokens: TokenBalance[] = []) => {
+        resetLogoutTimer(() => get().logout());
         set((state) => ({
           ...state,
           wallets: state.wallets.map(wallet =>
@@ -138,22 +156,25 @@ export const useAuthStore = create<AuthStore>()(
           )
         }));
       },
-      
+
+      // Check authentication status
       checkAuth: () => {
         const state = get();
         return !!(
           state.isAuthenticated &&
           state.masterKeyData &&
-          state.masterKeyData.masterKey &&
+          state.masterKeyData.keyHash &&
           state.masterKeyData.email
         );
       },
-      
+
+      // Get current user email
       getCurrentEmail: () => {
         const state = get();
         return state.masterKeyData?.email || null;
       },
-      
+
+      // Get master key (not persisted, only available in memory after login)
       getMasterKey: () => {
         const state = get();
         return state.masterKeyData?.masterKey || null;
@@ -162,22 +183,36 @@ export const useAuthStore = create<AuthStore>()(
     {
       name: 'hd-wallet-auth',
       storage: {
+        // Only restore sessionKey from sessionStorage
         getItem: (name: string) => {
-          const value = secureStorage.getItem(name);
-          return typeof value === 'string' ? JSON.parse(value) as StorageValue<AuthStore> : null;
+          // Only restore sessionKey from sessionStorage. Do not restore authenticated state.
+          const sessionKey = sessionStorage.getItem(name);
+          if (!sessionKey) return null;
+          // Always start as unauthenticated, require login on new tab/page
+          return {
+            state: {
+              ...initialState,
+              isAuthenticated: false,
+              masterKeyData: { email: '', masterKey: '', keyHash: sessionKey }
+            },
+            version: 0
+          } as StorageValue<AuthStore>;
         },
-        setItem: (name, value) => {
-          secureStorage.setItem(name, JSON.stringify(value));
+        // Only store sessionKey
+        setItem: (_name, value) => {
+          if (value?.state?.masterKeyData?.keyHash) {
+            sessionStorage.setItem('sessionKey', value.state.masterKeyData.keyHash);
+          }
         },
-        removeItem: (name) => {
-          secureStorage.removeItem(name);
+        removeItem: (_name) => {
+          sessionStorage.removeItem('sessionKey');
         },
       },
     }
   )
 );
 
-// Helper function to check authentication status
+// Helper to check authentication status
 export const isAuthenticated = () => {
   return useAuthStore.getState().checkAuth();
 };

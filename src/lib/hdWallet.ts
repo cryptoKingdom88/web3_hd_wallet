@@ -9,6 +9,7 @@ export interface WalletInfo {
   address: string;
   privateKey: string;
   publicKey: string;
+  path: string;
   balance: string;
   tokens: TokenBalance[];
 }
@@ -96,6 +97,7 @@ export const generateHDWallet = (masterKey: string, index: number): WalletInfo =
       address: childWallet.address,
       privateKey: childWallet.privateKey,
       publicKey: childWallet.publicKey,
+      path: derivationPath,
       balance: '0',
       tokens: []
     };
